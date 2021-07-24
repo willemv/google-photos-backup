@@ -1,0 +1,14 @@
+[package]
+name = "google-photos-backup"
+version = "0.1.0"
+authors = ["Willem Verstraeten <willem.verstraeten@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+oauth2 = { version = "*", features = ["reqwest"] }
+opener = "*"
+text_io = "*"
+tokio = {version = "*", features = ["full"]}
+reqwest = { version = "*", features = ["json"] }
+serde = { version = "*" }
+serde_json = { version = "*" }
