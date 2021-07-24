@@ -12,3 +12,4 @@ tokio = {version = "*", features = ["full"]}
 reqwest = { version = "*", features = ["json"] }
 serde = { version = "*" }
 serde_json = { version = "*" }
+directories = { version = "*" }

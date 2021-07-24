@@ -1,10 +1,13 @@
+extern crate directories;
 extern crate oauth2;
 extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
 
 use std::error::Error;
+use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 // use serde_json;
@@ -13,7 +16,7 @@ use oauth2::basic::{BasicClient, BasicTokenType};
 use oauth2::reqwest::async_http_client;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
-    Scope, TokenResponse, TokenUrl,
+    RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 // use url::Url;
 use text_io::read;
@@ -23,7 +26,7 @@ use text_io::read;
 // }
 #[derive(Deserialize, Debug)]
 struct MediaItem {
-id: String,
+    id: String,
     productUrl: String,
     baseUrl: String,
     mimeType: String,
@@ -53,43 +56,77 @@ async fn auth() -> Result<impl TokenResponse<BasicTokenType>, Box<dyn Error>> {
     // Set the URL the user will be redirected to after the authorization process.
     .set_redirect_uri(RedirectUrl::new("urn:ietf:wg:oauth:2.0:oob".to_string())?);
 
-    // Generate a PKCE challenge.
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    let refresh_token_path =
+        match directories::ProjectDirs::from("org", "oenli", "google-photos-backup") {
+            Some(project_dirs) => {
+                let mut root = project_dirs.data_local_dir().to_path_buf();
+                fs::create_dir_all(root.as_path())?;
+                root.push("refresh_token.bin");
+                root
+            }
+            None => PathBuf::from("refresh_token.bin"),
+        };
 
-    // Generate the full authorization URL.
-    let (auth_url, csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        // Set the desired scopes.
-        .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/photoslibrary.readonly".to_string(),
-        ))
-        // Set the PKCE code challenge.
-        .set_pkce_challenge(pkce_challenge)
-        .url();
+    println!("Reading refresh token from {:?}", refresh_token_path);
 
-    // This is the URL you should redirect the user to, in order to trigger the authorization
-    // process.
-    println!("Browse to: {}", auth_url);
+    let refresh_token = std::fs::read_to_string(refresh_token_path);
 
-    // Once the user has been redirected to the redirect URL, you'll have access to the
-    // authorization code. For security reasons, your code should verify that the `state`
-    // parameter returned by the server matches `csrf_state`.
+    match refresh_token {
+        Ok(token) => {
+            let r = client
+                .exchange_refresh_token(&RefreshToken::new(token))
+                .request_async(async_http_client)
+                .await?;
+            //TODO proper error handling for when refresh token is no longer valid
+            println!("Auth with refresh token");
+            Ok(r)
+        }
+        Err(_) => {
+            // Generate a PKCE challenge.
+            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-    print!("Paste authorization code here: ");
-    std::io::stdout().flush().ok();
-    let auth_code = read!("{}\n");
+            // Generate the full authorization URL.
+            let (auth_url, csrf_token) = client
+                .authorize_url(CsrfToken::new_random)
+                // Set the desired scopes.
+                .add_scope(Scope::new(
+                    "https://www.googleapis.com/auth/photoslibrary.readonly".to_string(),
+                ))
+                // Set the PKCE code challenge.
+                .set_pkce_challenge(pkce_challenge)
+                .url();
 
-    // Now you can trade it for an access token.
-    let token_result = client
-        .exchange_code(AuthorizationCode::new(auth_code))
-        // Set the PKCE code verifier.
-        .set_pkce_verifier(pkce_verifier)
-        .request_async(async_http_client)
-        .await?;
+            // This is the URL you should redirect the user to, in order to trigger the authorization
+            // process.
+            println!("Browse to: {}", auth_url);
 
-    // Unwrapping token_result will either produce a Token or a RequestTokenError.
+            // Once the user has been redirected to the redirect URL, you'll have access to the
+            // authorization code. For security reasons, your code should verify that the `state`
+            // parameter returned by the server matches `csrf_state`.
 
-    Ok(token_result)
+            print!("Paste authorization code here: ");
+            std::io::stdout().flush().ok();
+            let auth_code = read!("{}\n");
+
+            // Now you can trade it for an access token.
+            let token_result = client
+                .exchange_code(AuthorizationCode::new(auth_code))
+                // Set the PKCE code verifier.
+                .set_pkce_verifier(pkce_verifier)
+                .request_async(async_http_client)
+                .await?;
+
+            // Unwrapping token_result will either produce a Token or a RequestTokenError.
+
+            let refresh_token = token_result.refresh_token();
+            if let Some(token) = refresh_token {
+                //we don't mind if the refresh token doesn't get saved
+                let _ = std::fs::write("refresh_token.bin", token.secret());
+            }
+
+            Ok(token_result)
+        }
+    }
 }
 
 #[tokio::main]
@@ -108,7 +145,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             .bearer_auth(access_token.secret());
         request = match next_page {
             Some(token) => request.query(&[("pageToken", token.as_str()), ("pageSize", "100")]),
-            None => request.query(&[("pageSize", "100")])
+            None => request.query(&[("pageSize", "100")]),
         };
         let response = rest_client.execute(request.build()?).await?;
         let status = response.status();
@@ -121,14 +158,18 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 if next_page.is_none() {
                     break;
                 }
-            },
+            }
             Err(e) => {
-                println!("Error requesting media items. code {}, error {}, text {}", status, e, std::str::from_utf8(&bytes)?);
+                println!(
+                    "Error requesting media items. code {}, error {}, text {}",
+                    status,
+                    e,
+                    std::str::from_utf8(&bytes)?
+                );
                 println!("Count so far: {}", count);
                 break;
-            },
+            }
         };
-        println!("Next page token: {:?}", &next_page);
         println!("Count so far: {}", count);
     }
     println!("number of items in the media library: {}", count);
